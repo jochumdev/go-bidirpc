@@ -6,9 +6,10 @@ import (
 	"github.com/pcdummy/gosrpc"
 	"io"
 	"labix.org/v2/mgo/bson"
+	"sync"
 )
 
-func NewClient(conn io.ReadWriteCloser) (c *srpc.Protocol) {
+func NewClient(conn io.ReadWriteCloser) (c *srpc.Session) {
 	cc := NewCodec(conn)
 	c = srpc.NewClientWithCodec(cc)
 	return
@@ -20,11 +21,12 @@ func NewCodec(conn io.ReadWriteCloser) (cc srpc.Codec) {
 }
 
 type bSONRepReq struct {
-	T string      `bson:"T"` // Type
-	M string      `bson:"M"` // Method
-	V interface{} `bson:"V"` // Value
-	I uint64      `bson:"I"` // ID
-	S int         `bson:"S"` // Status
+	T    string      `bson:"T"` // Type
+	M    string      `bson:"M"` // Method
+	V    interface{} `bson:"V"` // Value
+	I    uint64      `bson:"I"` // ID
+	S    int         `bson:"S"` // Status
+	next *bSONRepReq
 }
 
 type bSONIncoming struct {
@@ -36,12 +38,14 @@ type bSONIncoming struct {
 }
 
 type codec struct {
-	conn io.ReadWriteCloser
-	body *bson.Raw
+	conn    io.ReadWriteCloser
+	body    *bson.Raw
+	bRRLock sync.Mutex
+	freeBRR *bSONRepReq
 }
 
 func (c *codec) WriteResponse(rs *srpc.Response, v interface{}) (err error) {
-	br := new(bSONRepReq)
+	br := c.getBSONRepReq()
 	br.T = "rep"
 	br.M = rs.ServiceMethod
 	br.I = rs.Seq
@@ -55,11 +59,12 @@ func (c *codec) WriteResponse(rs *srpc.Response, v interface{}) (err error) {
 
 	err = c.encode(br)
 
+	c.freeBSONRepReq(br)
 	return
 }
 
 func (c *codec) WriteRequest(req *srpc.Request, v interface{}) (err error) {
-	br := new(bSONRepReq)
+	br := c.getBSONRepReq()
 	br.T = "req"
 	br.M = req.ServiceMethod
 	br.V = v
@@ -67,6 +72,8 @@ func (c *codec) WriteRequest(req *srpc.Request, v interface{}) (err error) {
 	br.S = 0
 
 	err = c.encode(br)
+
+	c.freeBSONRepReq(br)
 	return
 }
 
@@ -110,6 +117,28 @@ func (c *codec) ReadBody(v interface{}) (err error) {
 func (c *codec) Close() (err error) {
 	err = c.conn.Close()
 	return
+}
+
+func (c *codec) getBSONRepReq() *bSONRepReq {
+	c.bRRLock.Lock()
+
+	brr := c.freeBRR
+	if brr == nil {
+		brr = new(bSONRepReq)
+	} else {
+		c.freeBRR = brr.next
+		*brr = bSONRepReq{}
+	}
+
+	c.bRRLock.Unlock()
+	return brr
+}
+
+func (c *codec) freeBSONRepReq(req *bSONRepReq) {
+	c.bRRLock.Lock()
+	req.next = c.freeBRR
+	c.freeBRR = req
+	c.bRRLock.Unlock()
 }
 
 func (c *codec) encode(v interface{}) (err error) {
