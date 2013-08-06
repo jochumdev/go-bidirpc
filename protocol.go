@@ -6,7 +6,6 @@ package srpc
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"reflect"
@@ -483,38 +482,7 @@ func (server *Protocol) read(s *Session) (service *service, mtype *methodType, r
 		break
 
 	case RESPONSE:
-		seq := repReq.Seq
-		s.mutex.Lock()
-		call := s.pending[seq]
-		delete(s.pending, seq)
-		s.mutex.Unlock()
-
-		switch {
-		case call == nil:
-			// We've got no pending call. That usually means that
-			// WriteRequest partially failed, and call was already
-			// removed; response is a server telling us about an
-			// error reading request body.
-			if err != nil {
-				err = errors.New("Unknown response id: " + string(seq))
-			}
-		case repReq.Error != "":
-			// We've got an error response. Give this to the request;
-			// any subsequent requests will get the ReadResponseBody
-			// error if there is one.
-			call.Error = ServerError(repReq.Error)
-			call.done()
-		default:
-			err = s.codec.ReadBody(call.Reply)
-			if err != nil {
-				call.Error = errors.New(fmt.Sprintf("Invalid response value: %v", call.Reply))
-				call.done()
-				err = nil
-				return
-			}
-
-			call.done()
-		}
+		s.handleResponse(err, repReq)
 		break
 	}
 
