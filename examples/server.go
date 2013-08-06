@@ -50,7 +50,7 @@ func main() {
 		if err != nil {
 			log.Fatal("accept error:", err)
 		}
-		rpcCodec := bsonrpc.NewServerCodec(conn)
+		rpcCodec := bsonrpc.NewCodec(conn)
 		go srpc.ServeCodec(rpcCodec)
 	}
 }

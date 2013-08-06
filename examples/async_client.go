@@ -21,7 +21,7 @@ type MultiplyArgs struct {
 	A, B int
 }
 
-func call(client *srpc.Protokoll, wg *sync.WaitGroup) {
+func call(client *srpc.Protocol, wg *sync.WaitGroup) {
 	// Asynchronous call
 	//var reply string
 	var intReply int
@@ -47,7 +47,7 @@ func main() {
 		log.Fatal("dialing:", err)
 	}
 
-	client := bsonrpc.NewSClient(conn)
+	client := bsonrpc.NewClient(conn)
 	defer client.Close()
 
 	wg := &sync.WaitGroup{}

@@ -139,6 +139,16 @@ const (
 	DefaultDebugPath = "/debug/rpc"
 )
 
+// ServerError represents an error that has been returned from
+// the remote side of the RPC connection.
+type ServerError string
+
+func (e ServerError) Error() string {
+	return string(e)
+}
+
+var ErrShutdown = errors.New("connection is shut down")
+
 // Precompute the reflect type for error.  Can't use error directly
 // because Typeof takes an empty interface value.  This is annoying.
 var typeOfError = reflect.TypeOf((*error)(nil)).Elem()
@@ -162,6 +172,26 @@ const (
 	REQUEST  = 0
 	RESPONSE = 1
 )
+
+// Call represents an active RPC.
+type Call struct {
+	ServiceMethod string      // The name of the service and method to call.
+	Args          interface{} // The argument to the function (*struct).
+	Reply         interface{} // The reply from the function (*struct).
+	Error         error       // After completion, the error status.
+	Done          chan *Call  // Strobes when call is complete.
+}
+
+func (call *Call) done() {
+	select {
+	case call.Done <- call:
+		// ok
+	default:
+		// We don't want to block here.  It is the caller's responsibility to make
+		// sure the channel has enough buffer space. See comment in Go().
+		log.Println("rpc: discarding Call reply due to insufficient Done chan capacity")
+	}
+}
 
 type RepReq struct {
 	Type          int // Either REQUEST OR RESPONSE
@@ -191,8 +221,8 @@ type Response struct {
 	next          *Response // for free list in Server
 }
 
-// Protokoll represents an RPC Protokoll.
-type Protokoll struct {
+// Protocol represents an RPC Protocol.
+type Protocol struct {
 	mu         sync.RWMutex // protects the serviceMap
 	serviceMap map[string]*service
 	reqLock    sync.Mutex // protects freeReq
@@ -205,7 +235,7 @@ type Protokoll struct {
 	sending  sync.Mutex
 	request  Request
 	seq      uint64
-	codec    ClientCodec
+	codec    Codec
 	pending  map[uint64]*Call
 	closing  bool
 	shutdown bool
@@ -213,8 +243,8 @@ type Protokoll struct {
 
 // NewClientWithCodec uses the specified
 // codec to encode requests and decode responses.
-func NewClientWithCodec(codec ServerCodec) *Protokoll {
-	client := &Protokoll{
+func NewClientWithCodec(codec Codec) *Protocol {
+	client := &Protocol{
 		codec:   codec,
 		pending: make(map[uint64]*Call),
 	}
@@ -223,11 +253,11 @@ func NewClientWithCodec(codec ServerCodec) *Protokoll {
 }
 
 // NewServer returns a new Server.
-func NewServer() *Protokoll {
-	return &Protokoll{serviceMap: make(map[string]*service)}
+func NewServer() *Protocol {
+	return &Protocol{serviceMap: make(map[string]*service)}
 }
 
-// DefaultServer is the default instance of *Protokoll.
+// DefaultServer is the default instance of *Protocol.
 var DefaultServer = NewServer()
 
 // Is this an exported - upper case - name?
@@ -246,7 +276,7 @@ func isExportedOrBuiltinType(t reflect.Type) bool {
 	return isExported(t.Name()) || t.PkgPath() == ""
 }
 
-func (server *Protokoll) sendRequest(call *Call) {
+func (server *Protocol) sendRequest(call *Call) {
 	server.sending.Lock()
 	defer server.sending.Unlock()
 
@@ -288,17 +318,17 @@ func (server *Protokoll) sendRequest(call *Call) {
 // no methods or unsuitable methods. It also logs the error using package log.
 // The client accesses each method using a string of the form "Type.Method",
 // where Type is the receiver's concrete type.
-func (server *Protokoll) Register(rcvr interface{}) error {
+func (server *Protocol) Register(rcvr interface{}) error {
 	return server.register(rcvr, "", false)
 }
 
 // RegisterName is like Register but uses the provided name for the type
 // instead of the receiver's concrete type.
-func (server *Protokoll) RegisterName(name string, rcvr interface{}) error {
+func (server *Protocol) RegisterName(name string, rcvr interface{}) error {
 	return server.register(rcvr, name, true)
 }
 
-func (server *Protokoll) register(rcvr interface{}, name string, useName bool) error {
+func (server *Protocol) register(rcvr interface{}, name string, useName bool) error {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	if server.serviceMap == nil {
@@ -411,7 +441,7 @@ func suitableMethods(typ reflect.Type, reportErr bool) map[string]*methodType {
 // contains an error when it is used.
 var invalidRequest = struct{}{}
 
-func (server *Protokoll) sendResponse(sending *sync.Mutex, req *RepReq, reply interface{}, codec ServerCodec, errmsg string) {
+func (server *Protocol) sendResponse(sending *sync.Mutex, req *RepReq, reply interface{}, codec Codec, errmsg string) {
 	resp := server.getResponse()
 	// Encode the response header
 	resp.ServiceMethod = req.ServiceMethod
@@ -436,7 +466,7 @@ func (m *methodType) NumCalls() (n uint) {
 	return n
 }
 
-func (s *service) call(server *Protokoll, sending *sync.Mutex, mtype *methodType, req *RepReq, argv, replyv reflect.Value, codec ServerCodec) {
+func (s *service) call(server *Protocol, sending *sync.Mutex, mtype *methodType, req *RepReq, argv, replyv reflect.Value, codec Codec) {
 	mtype.Lock()
 	mtype.numCalls++
 	mtype.Unlock()
@@ -455,7 +485,7 @@ func (s *service) call(server *Protokoll, sending *sync.Mutex, mtype *methodType
 
 // ServeCodec is like ServeConn but uses the specified codec to
 // decode requests and encode responses.
-func (server *Protokoll) ServeCodec(codec ServerCodec) {
+func (server *Protocol) ServeCodec(codec Codec) {
 	sending := new(sync.Mutex)
 	for {
 		service, mtype, req, argv, replyv, keepReading, err := server.read(codec)
@@ -503,7 +533,7 @@ func (server *Protokoll) ServeCodec(codec ServerCodec) {
 	codec.Close()
 }
 
-func (server *Protokoll) getRequest() *RepReq {
+func (server *Protocol) getRequest() *RepReq {
 	server.reqLock.Lock()
 	req := server.freeReq
 	if req == nil {
@@ -516,14 +546,14 @@ func (server *Protokoll) getRequest() *RepReq {
 	return req
 }
 
-func (server *Protokoll) freeRequest(req *RepReq) {
+func (server *Protocol) freeRequest(req *RepReq) {
 	server.reqLock.Lock()
 	req.next = server.freeReq
 	server.freeReq = req
 	server.reqLock.Unlock()
 }
 
-func (server *Protokoll) getResponse() *Response {
+func (server *Protocol) getResponse() *Response {
 	server.respLock.Lock()
 	resp := server.freeResp
 	if resp == nil {
@@ -536,14 +566,14 @@ func (server *Protokoll) getResponse() *Response {
 	return resp
 }
 
-func (server *Protokoll) freeResponse(resp *Response) {
+func (server *Protocol) freeResponse(resp *Response) {
 	server.respLock.Lock()
 	resp.next = server.freeResp
 	server.freeResp = resp
 	server.respLock.Unlock()
 }
 
-func (server *Protokoll) read(codec ServerCodec) (service *service, mtype *methodType, repReq *RepReq, argv, replyv reflect.Value, keepReading bool, err error) {
+func (server *Protocol) read(codec Codec) (service *service, mtype *methodType, repReq *RepReq, argv, replyv reflect.Value, keepReading bool, err error) {
 	// Grab the request header.
 	repReq = server.getRequest()
 	err = codec.ReadHeader(repReq)
@@ -642,7 +672,7 @@ func (server *Protokoll) read(codec ServerCodec) (service *service, mtype *metho
 	return
 }
 
-func (client *Protokoll) Close() error {
+func (client *Protocol) Close() error {
 	client.mutex.Lock()
 	if client.shutdown || client.closing {
 		client.mutex.Unlock()
@@ -657,7 +687,7 @@ func (client *Protokoll) Close() error {
 // the invocation.  The done channel will signal when the call is complete by returning
 // the same Call object.  If done is nil, Go will allocate a new channel.
 // If non-nil, done must be buffered or Go will deliberately crash.
-func (client *Protokoll) Go(serviceMethod string, args interface{}, reply interface{}, done chan *Call) *Call {
+func (client *Protocol) Go(serviceMethod string, args interface{}, reply interface{}, done chan *Call) *Call {
 	call := new(Call)
 	call.ServiceMethod = serviceMethod
 	call.Args = args
@@ -679,7 +709,7 @@ func (client *Protokoll) Go(serviceMethod string, args interface{}, reply interf
 }
 
 // Call invokes the named function, waits for it to complete, and returns its error status.
-func (client *Protokoll) Call(serviceMethod string, args interface{}, reply interface{}) error {
+func (client *Protocol) Call(serviceMethod string, args interface{}, reply interface{}) error {
 	call := <-client.Go(serviceMethod, args, reply, make(chan *Call, 1)).Done
 	return call.Error
 }
@@ -693,14 +723,14 @@ func RegisterName(name string, rcvr interface{}) error {
 	return DefaultServer.RegisterName(name, rcvr)
 }
 
-// A ServerCodec implements reading of RPC requests and writing of
+// A Codec implements reading of RPC requests and writing of
 // RPC responses for the server side of an RPC session.
 // The server calls ReadRequestHeader and ReadRequestBody in pairs
 // to read requests from the connection, and it calls WriteResponse to
 // write a response back.  The server calls Close when finished with the
 // connection. ReadRequestBody may be called with a nil
 // argument to force the body of the request to be read and discarded.
-type ServerCodec interface {
+type Codec interface {
 	ReadHeader(*RepReq) error
 	ReadBody(interface{}) error
 	WriteResponse(*Response, interface{}) error
@@ -711,7 +741,7 @@ type ServerCodec interface {
 
 // ServeCodec is like ServeConn but uses the specified codec to
 // decode requests and encode responses.
-func ServeCodec(codec ServerCodec) {
+func ServeCodec(codec Codec) {
 	DefaultServer.ServeCodec(codec)
 }
 
