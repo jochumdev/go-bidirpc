@@ -213,7 +213,7 @@ type Protokoll struct {
 
 // NewClientWithCodec uses the specified
 // codec to encode requests and decode responses.
-func NewSClientWithCodec(codec ServerCodec) *Protokoll {
+func NewClientWithCodec(codec ServerCodec) *Protokoll {
 	client := &Protokoll{
 		codec:   codec,
 		pending: make(map[uint64]*Call),

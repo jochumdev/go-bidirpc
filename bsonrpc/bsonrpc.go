@@ -8,15 +8,9 @@ import (
 	"labix.org/v2/mgo/bson"
 )
 
-func NewClient(conn io.ReadWriteCloser) (c *srpc.Client) {
-	cc := NewClientCodec(conn)
-	c = srpc.NewClientWithCodec(cc)
-	return
-}
-
-func NewSClient(conn io.ReadWriteCloser) (c *srpc.Protokoll) {
+func NewClient(conn io.ReadWriteCloser) (c *srpc.Protokoll) {
 	cc := NewServerCodec(conn)
-	c = srpc.NewSClientWithCodec(cc)
+	c = srpc.NewClientWithCodec(cc)
 	return
 }
 
