@@ -53,7 +53,7 @@ func (c *codec) WriteResponse(rs *srpc.Response, v interface{}) (err error) {
 		br.S = 0
 	}
 
-	c.encode(br)
+	err = c.encode(br)
 
 	return
 }
