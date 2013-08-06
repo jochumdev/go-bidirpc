@@ -221,6 +221,94 @@ type Response struct {
 	next          *Response // for free list in Server
 }
 
+// Contains per Session data / locks.
+// ServeCodec creates one instance per Session / Connection.
+type Session struct {
+	mutex    sync.Mutex // protects pending, seq, request
+	sending  sync.Mutex
+	request  Request
+	codec    Codec
+	seq      uint64
+	pending  map[uint64]*Call
+	closing  bool
+	shutdown bool
+}
+
+func (s *Session) Close() error {
+	s.mutex.Lock()
+	if s.shutdown || s.closing {
+		s.mutex.Unlock()
+		return ErrShutdown
+	}
+	s.closing = true
+	s.mutex.Unlock()
+	return s.codec.Close()
+}
+
+// Go invokes the function asynchronously.  It returns the Call structure representing
+// the invocation.  The done channel will signal when the call is complete by returning
+// the same Call object.  If done is nil, Go will allocate a new channel.
+// If non-nil, done must be buffered or Go will deliberately crash.
+func (s *Session) Go(serviceMethod string, args interface{}, reply interface{}, done chan *Call) *Call {
+	call := new(Call)
+	call.ServiceMethod = serviceMethod
+	call.Args = args
+	call.Reply = reply
+	if done == nil {
+		done = make(chan *Call, 10) // buffered.
+	} else {
+		// If caller passes done != nil, it must arrange that
+		// done has enough buffer for the number of simultaneous
+		// RPCs that will be using that channel.  If the channel
+		// is totally unbuffered, it's best not to run at all.
+		if cap(done) == 0 {
+			log.Panic("rpc: done channel is unbuffered")
+		}
+	}
+	call.Done = done
+	s.sendRequest(call)
+	return call
+}
+
+// Call invokes the named function, waits for it to complete, and returns its error status.
+func (s *Session) Call(serviceMethod string, args interface{}, reply interface{}) error {
+	call := <-s.Go(serviceMethod, args, reply, make(chan *Call, 1)).Done
+	return call.Error
+}
+
+func (s *Session) sendRequest(call *Call) {
+	s.sending.Lock()
+	defer s.sending.Unlock()
+
+	// Register this call.
+	s.mutex.Lock()
+	if s.shutdown || s.closing {
+		call.Error = ErrShutdown
+		s.mutex.Unlock()
+		call.done()
+		return
+	}
+	seq := s.seq
+	s.seq++
+	s.pending[seq] = call
+	s.mutex.Unlock()
+
+	// Encode and send the request.
+	s.request.Seq = seq
+	s.request.ServiceMethod = call.ServiceMethod
+	err := s.codec.WriteRequest(&s.request, call.Args)
+	if err != nil {
+		s.mutex.Lock()
+		call = s.pending[seq]
+		delete(s.pending, seq)
+		s.mutex.Unlock()
+		if call != nil {
+			call.Error = err
+			call.done()
+		}
+	}
+}
+
 // Protocol represents an RPC Protocol.
 type Protocol struct {
 	mu         sync.RWMutex // protects the serviceMap
@@ -229,27 +317,18 @@ type Protocol struct {
 	freeReq    *RepReq
 	respLock   sync.Mutex // protects freeResp
 	freeResp   *Response
-
-	// Client part
-	mutex    sync.Mutex // protects pending, seq, request
-	sending  sync.Mutex
-	request  Request
-	seq      uint64
-	codec    Codec
-	pending  map[uint64]*Call
-	closing  bool
-	shutdown bool
 }
 
 // NewClientWithCodec uses the specified
 // codec to encode requests and decode responses.
-func NewClientWithCodec(codec Codec) *Protocol {
-	client := &Protocol{
+func NewClientWithCodec(codec Codec) *Session {
+	s := &Session{
 		codec:   codec,
 		pending: make(map[uint64]*Call),
 	}
-	go client.ServeCodec(codec)
-	return client
+
+	go DefaultServer.ServeSession(s)
+	return s
 }
 
 // NewServer returns a new Server.
@@ -274,39 +353,6 @@ func isExportedOrBuiltinType(t reflect.Type) bool {
 	// PkgPath will be non-empty even for an exported type,
 	// so we need to check the type name as well.
 	return isExported(t.Name()) || t.PkgPath() == ""
-}
-
-func (server *Protocol) sendRequest(call *Call) {
-	server.sending.Lock()
-	defer server.sending.Unlock()
-
-	// Register this call.
-	server.mutex.Lock()
-	if server.shutdown || server.closing {
-		call.Error = ErrShutdown
-		server.mutex.Unlock()
-		call.done()
-		return
-	}
-	seq := server.seq
-	server.seq++
-	server.pending[seq] = call
-	server.mutex.Unlock()
-
-	// Encode and send the request.
-	server.request.Seq = seq
-	server.request.ServiceMethod = call.ServiceMethod
-	err := server.codec.WriteRequest(&server.request, call.Args)
-	if err != nil {
-		server.mutex.Lock()
-		call = server.pending[seq]
-		delete(server.pending, seq)
-		server.mutex.Unlock()
-		if call != nil {
-			call.Error = err
-			call.done()
-		}
-	}
 }
 
 // Register publishes in the server the set of methods of the
@@ -483,12 +529,9 @@ func (s *service) call(server *Protocol, sending *sync.Mutex, mtype *methodType,
 	server.freeRequest(req)
 }
 
-// ServeCodec is like ServeConn but uses the specified codec to
-// decode requests and encode responses.
-func (server *Protocol) ServeCodec(codec Codec) {
-	sending := new(sync.Mutex)
-	for {
-		service, mtype, req, argv, replyv, keepReading, err := server.read(codec)
+func (p *Protocol) ServeSession(s *Session) {
+	for !s.closing {
+		service, mtype, req, argv, replyv, keepReading, err := p.read(s)
 		if err != nil {
 			if err != io.EOF {
 				log.Println("rpc:", err)
@@ -498,39 +541,50 @@ func (server *Protocol) ServeCodec(codec Codec) {
 			}
 			// send a response if we actually managed to read a header.
 			if req != nil {
-				server.sendResponse(sending, req, invalidRequest, codec, err.Error())
-				server.freeRequest(req)
+				p.sendResponse(&s.sending, req, invalidRequest, s.codec, err.Error())
+				p.freeRequest(req)
 			}
 			continue
 		}
 
 		if req.Type == REQUEST {
-			go service.call(server, sending, mtype, req, argv, replyv, codec)
+			go service.call(p, &s.sending, mtype, req, argv, replyv, s.codec)
 		}
 	}
 
 	// Terminate pending calls.
-	server.sending.Lock()
-	server.mutex.Lock()
-	server.shutdown = true
-	closing := server.closing
+	s.sending.Lock()
+	s.mutex.Lock()
+	s.shutdown = true
+	closing := s.closing
 	var err error
 	if closing {
 		err = ErrShutdown
 	} else {
 		err = io.ErrUnexpectedEOF
 	}
-	for _, call := range server.pending {
+	for _, call := range s.pending {
 		call.Error = err
 		call.done()
 	}
-	server.mutex.Unlock()
-	server.sending.Unlock()
+	s.mutex.Unlock()
+	s.sending.Unlock()
 	if err != io.EOF && !closing {
 		log.Println("rpc: server protocol error:", err)
 	}
 
-	codec.Close()
+	s.Close()
+}
+
+// ServeCodec is like ServeConn but uses the specified codec to
+// decode requests and encode responses.
+func (p *Protocol) ServeCodec(codec Codec) {
+	session := &Session{
+		codec:   codec,
+		pending: make(map[uint64]*Call),
+	}
+
+	p.ServeSession(session)
 }
 
 func (server *Protocol) getRequest() *RepReq {
@@ -573,10 +627,10 @@ func (server *Protocol) freeResponse(resp *Response) {
 	server.respLock.Unlock()
 }
 
-func (server *Protocol) read(codec Codec) (service *service, mtype *methodType, repReq *RepReq, argv, replyv reflect.Value, keepReading bool, err error) {
+func (server *Protocol) read(s *Session) (service *service, mtype *methodType, repReq *RepReq, argv, replyv reflect.Value, keepReading bool, err error) {
 	// Grab the request header.
 	repReq = server.getRequest()
-	err = codec.ReadHeader(repReq)
+	err = s.codec.ReadHeader(repReq)
 	if err != nil {
 		repReq = nil
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
@@ -622,7 +676,7 @@ func (server *Protocol) read(codec Codec) (service *service, mtype *methodType, 
 			argIsValue = true
 		}
 		// argv guaranteed to be a pointer now.
-		if err = codec.ReadBody(argv.Interface()); err != nil {
+		if err = s.codec.ReadBody(argv.Interface()); err != nil {
 			return
 		}
 		if argIsValue {
@@ -635,10 +689,10 @@ func (server *Protocol) read(codec Codec) (service *service, mtype *methodType, 
 
 	case RESPONSE:
 		seq := repReq.Seq
-		server.mutex.Lock()
-		call := server.pending[seq]
-		delete(server.pending, seq)
-		server.mutex.Unlock()
+		s.mutex.Lock()
+		call := s.pending[seq]
+		delete(s.pending, seq)
+		s.mutex.Unlock()
 
 		switch {
 		case call == nil:
@@ -656,7 +710,7 @@ func (server *Protocol) read(codec Codec) (service *service, mtype *methodType, 
 			call.Error = ServerError(repReq.Error)
 			call.done()
 		default:
-			err = server.codec.ReadBody(call.Reply)
+			err = s.codec.ReadBody(call.Reply)
 			if err != nil {
 				call.Error = errors.New(fmt.Sprintf("Invalid response value: %v", call.Reply))
 				call.done()
@@ -670,48 +724,6 @@ func (server *Protocol) read(codec Codec) (service *service, mtype *methodType, 
 	}
 
 	return
-}
-
-func (client *Protocol) Close() error {
-	client.mutex.Lock()
-	if client.shutdown || client.closing {
-		client.mutex.Unlock()
-		return ErrShutdown
-	}
-	client.closing = true
-	client.mutex.Unlock()
-	return client.codec.Close()
-}
-
-// Go invokes the function asynchronously.  It returns the Call structure representing
-// the invocation.  The done channel will signal when the call is complete by returning
-// the same Call object.  If done is nil, Go will allocate a new channel.
-// If non-nil, done must be buffered or Go will deliberately crash.
-func (client *Protocol) Go(serviceMethod string, args interface{}, reply interface{}, done chan *Call) *Call {
-	call := new(Call)
-	call.ServiceMethod = serviceMethod
-	call.Args = args
-	call.Reply = reply
-	if done == nil {
-		done = make(chan *Call, 10) // buffered.
-	} else {
-		// If caller passes done != nil, it must arrange that
-		// done has enough buffer for the number of simultaneous
-		// RPCs that will be using that channel.  If the channel
-		// is totally unbuffered, it's best not to run at all.
-		if cap(done) == 0 {
-			log.Panic("rpc: done channel is unbuffered")
-		}
-	}
-	call.Done = done
-	client.sendRequest(call)
-	return call
-}
-
-// Call invokes the named function, waits for it to complete, and returns its error status.
-func (client *Protocol) Call(serviceMethod string, args interface{}, reply interface{}) error {
-	call := <-client.Go(serviceMethod, args, reply, make(chan *Call, 1)).Done
-	return call.Error
 }
 
 // Register publishes the receiver's methods in the DefaultServer.

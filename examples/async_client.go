@@ -21,7 +21,7 @@ type MultiplyArgs struct {
 	A, B int
 }
 
-func call(client *srpc.Protocol, wg *sync.WaitGroup) {
+func call(client *srpc.Session, wg *sync.WaitGroup) {
 	// Asynchronous call
 	//var reply string
 	var intReply int
