@@ -47,7 +47,7 @@ func (c *codec) Write(rs *bidirpc.RepReq, v interface{}) (err error) {
 		return
 	}
 
-	c.wBuf.Flush()
+	err = c.wBuf.Flush()
 
 	return
 }
