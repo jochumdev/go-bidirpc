@@ -8,6 +8,7 @@ import (
 	"github.com/pcdummy/go-bidirpc"
 	"github.com/pcdummy/go-bidirpc/bsonrpc"
 	"github.com/pcdummy/go-bidirpc/gobrpc"
+	"github.com/pcdummy/go-bidirpc/msgpackrpc"
 	"log"
 	"net"
 	"runtime"
@@ -17,8 +18,8 @@ import (
 )
 
 var (
-	serverBSON, serverGob string
-	onceBSON, onceGob     sync.Once
+	serverBSON, serverGob, serverMsgPack string
+	onceBSON, onceGob, onceMsgPack       sync.Once
 )
 
 type Args struct {
@@ -83,6 +84,25 @@ func startGobServer() {
 	}()
 }
 
+func startMsgPackServer() {
+	var l net.Listener
+	l, serverMsgPack = listenTCP()
+
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				log.Fatal("accept error:", err)
+			}
+
+			c := msgpackrpc.NewCodec(conn)
+			s := bidirpc.NewProtocol(c)
+			s.Register(new(Arith))
+			go s.Serve()
+		}
+	}()
+}
+
 func TestBSONConnection(t *testing.T) {
 	onceBSON.Do(startBSONServer)
 
@@ -115,6 +135,27 @@ func TestGobConnection(t *testing.T) {
 	args := &Args{7, 8}
 	reply := new(Reply)
 	client := gobrpc.NewClient(conn)
+	err = client.Call("Arith.Add", args, reply)
+	if err != nil {
+		t.Fatalf("rpc error: Add: expected no error but got string %q", err.Error())
+	}
+	if reply.C != args.A+args.B {
+		t.Fatalf("rpc error: Add: expected %d got %d", reply.C, args.A+args.B)
+	}
+	client.Close()
+}
+
+func TestMsgPackConnection(t *testing.T) {
+	onceMsgPack.Do(startMsgPackServer)
+
+	conn, err := net.Dial("tcp", serverMsgPack)
+	if err != nil {
+		log.Fatal("error dialing:", err)
+	}
+
+	args := &Args{7, 8}
+	reply := new(Reply)
+	client := msgpackrpc.NewClient(conn)
 	err = client.Call("Arith.Add", args, reply)
 	if err != nil {
 		t.Fatalf("rpc error: Add: expected no error but got string %q", err.Error())
