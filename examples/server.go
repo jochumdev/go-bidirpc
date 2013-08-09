@@ -25,6 +25,8 @@ type EchoReply struct {
 	Result string
 }
 
+// The protocol excutes this method when it finds it.
+// this allows the Server to do t.p.Call() / t.p.Go() on the client.
 func (t *Arith) SetProtocol(p *bidirpc.Protocol) {
 	t.p = p
 }
@@ -32,6 +34,7 @@ func (t *Arith) SetProtocol(p *bidirpc.Protocol) {
 func (t *Arith) Echo(args *EchoArgs, reply *EchoReply) (err error) {
 	fmt.Println("Echo from client:", args.EchoMe)
 
+	// Run a call on the client
 	var nreply EchoReply
 	err = t.p.Call("Arith.Echo", &EchoArgs{EchoMe: "Hey client how are you?"}, &nreply)
 
@@ -51,6 +54,10 @@ func main() {
 			log.Fatal("accept error:", err)
 		}
 
+		// Every connection needs a codec, a new Protocol
+		// and the methods needs to be Registered at every session.
+		// The methods need to be goroutine save and they
+		// are unique per session.
 		c := bsonrpc.NewCodec(conn)
 		s := bidirpc.NewProtocol(c)
 		s.Register(new(Arith))
