@@ -5,56 +5,55 @@
 package main
 
 import (
-	"errors"
+	"fmt"
 	"github.com/pcdummy/gosrpc"
 	"github.com/pcdummy/gosrpc/bsonrpc"
 	"log"
 	"net"
-	"time"
 )
 
-type Args struct {
-	A, B int
+type Arith struct {
+	count int
+	p     *bidirpc.Protocol
 }
 
-type Quotient struct {
-	Quo, Rem int
+type EchoArgs struct {
+	EchoMe string `bson:"echoMe"`
 }
 
-type Arith int
-
-func (t *Arith) Multiply(args *Args, reply *int) error {
-	*reply = args.A * args.B
-
-	return nil
+type EchoReply struct {
+	Result string
 }
 
-func (t *Arith) Divide(args *Args, quo *Quotient) error {
-	if args.B == 0 {
-		return errors.New("divide by zero")
-	}
-	quo.Quo = args.A / args.B
-	quo.Rem = args.A % args.B
+func (t *Arith) SetProtocol(p *bidirpc.Protocol) {
+	t.p = p
+}
 
-	time.Sleep(time.Duration(100-args.A) * time.Second)
+func (t *Arith) Echo(args *EchoArgs, reply *EchoReply) (err error) {
+	fmt.Println("Echo from client:", args.EchoMe)
 
-	return nil
+	var nreply EchoReply
+	err = t.p.Call("Arith.Echo", &EchoArgs{EchoMe: "Hey client how are you?"}, &nreply)
+
+	reply.Result = args.EchoMe
+	return err
 }
 
 func main() {
-	arith := new(Arith)
-	srpc.Register(arith)
-
-	listener, err := net.Listen("tcp", ":9990")
+	l, err := net.Listen("tcp", ":9990")
 	if err != nil {
 		log.Fatal("listen error:", err)
 	}
+
 	for {
-		conn, err := listener.Accept()
+		conn, err := l.Accept()
 		if err != nil {
 			log.Fatal("accept error:", err)
 		}
-		rpcCodec := bsonrpc.NewCodec(conn)
-		go srpc.ServeCodec(rpcCodec)
+
+		c := bsonrpc.NewCodec(conn)
+		s := bidirpc.NewProtocol(c)
+		s.Register(new(Arith))
+		go s.Serve()
 	}
 }

@@ -6,6 +6,7 @@ package srpc
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"reflect"
@@ -13,12 +14,6 @@ import (
 	"sync"
 	"unicode"
 	"unicode/utf8"
-)
-
-const (
-	// Defaults used by HandleHTTP
-	DefaultRPCPath   = "/_goRPC_"
-	DefaultDebugPath = "/debug/rpc"
 )
 
 // ServerError represents an error that has been returned from
@@ -36,11 +31,9 @@ var ErrShutdown = errors.New("connection is shut down")
 var typeOfError = reflect.TypeOf((*error)(nil)).Elem()
 
 type methodType struct {
-	sync.Mutex // protects counters
-	method     reflect.Method
-	ArgType    reflect.Type
-	ReplyType  reflect.Type
-	numCalls   uint
+	method    reflect.Method
+	ArgType   reflect.Type
+	ReplyType reflect.Type
 }
 
 type service struct {
@@ -51,9 +44,17 @@ type service struct {
 }
 
 const (
-	REQUEST  = 0
-	RESPONSE = 1
+	REQUEST  = 1
+	RESPONSE = 2
 )
+
+type RepReq struct {
+	Type          int `bson:",minsize"` // Either REQUEST OR RESPONSE
+	ServiceMethod string
+	Seq           uint64
+	Error         string `bson:",omitempty"`
+	next          *RepReq
+}
 
 // Call represents an active RPC.
 type Call struct {
@@ -75,63 +76,39 @@ func (call *Call) done() {
 	}
 }
 
-type RepReq struct {
-	Type          int // Either REQUEST OR RESPONSE
-	ServiceMethod string
-	Seq           uint64
-	Error         string
-	Value         interface{} // Contains either the kwargs
-	next          *RepReq
-}
-
-// Request is a header written before every RPC call.  It is used int	ernally
-// but documented here as an aid to debugging, such as when analyzing
-// network traffic.
-type Request struct {
-	ServiceMethod string   // format: "Service.Method"
-	Seq           uint64   // sequence number chosen by client
-	next          *Request // for free list in Server
-}
-
-// Response is a header written before every RPC return.  It is used internally
-// but documented here as an aid to debugging, such as when analyzing
-// network traffic.
-type Response struct {
-	ServiceMethod string    // echoes that of the Request
-	Seq           uint64    // echoes that of the request
-	Error         string    // error, if any.
-	next          *Response // for free list in Server
-}
-
 // Protocol represents an RPC Protocol.
 type Protocol struct {
 	mu         sync.RWMutex // protects the serviceMap
 	serviceMap map[string]*service
 	reqLock    sync.Mutex // protects freeReq
 	freeReq    *RepReq
-	respLock   sync.Mutex // protects freeResp
-	freeResp   *Response
+
+	mutex    sync.Mutex // protects pending, seq, request
+	sending  sync.Mutex
+	request  RepReq
+	codec    Codec
+	seq      uint64
+	pending  map[uint64]*Call
+	closing  bool
+	shutdown bool
 }
 
 // NewClientWithCodec uses the specified
 // codec to encode requests and decode responses.
-func NewClientWithCodec(codec Codec) *Session {
-	s := &Session{
-		codec:   codec,
-		pending: make(map[uint64]*Call),
-	}
-
-	go DefaultServer.ServeSession(s)
+func NewClientWithCodec(codec Codec) *Protocol {
+	s := NewProtocol(codec)
+	go s.Serve()
 	return s
 }
 
 // NewServer returns a new Server.
-func NewServer() *Protocol {
-	return &Protocol{serviceMap: make(map[string]*service)}
+func NewProtocol(codec Codec) *Protocol {
+	return &Protocol{
+		codec:      codec,
+		serviceMap: make(map[string]*service),
+		pending:    make(map[uint64]*Call),
+	}
 }
-
-// DefaultServer is the default instance of *Protocol.
-var DefaultServer = NewServer()
 
 // Is this an exported - upper case - name?
 func isExported(name string) bool {
@@ -158,25 +135,35 @@ func isExportedOrBuiltinType(t reflect.Type) bool {
 // no methods or unsuitable methods. It also logs the error using package log.
 // The client accesses each method using a string of the form "Type.Method",
 // where Type is the receiver's concrete type.
-func (server *Protocol) Register(rcvr interface{}) error {
-	return server.register(rcvr, "", false)
+func (p *Protocol) Register(rcvr interface{}) error {
+	return p.register(rcvr, "", false)
 }
 
 // RegisterName is like Register but uses the provided name for the type
 // instead of the receiver's concrete type.
-func (server *Protocol) RegisterName(name string, rcvr interface{}) error {
-	return server.register(rcvr, name, true)
+func (p *Protocol) RegisterName(name string, rcvr interface{}) error {
+	return p.register(rcvr, name, true)
 }
 
-func (server *Protocol) register(rcvr interface{}, name string, useName bool) error {
-	server.mu.Lock()
-	defer server.mu.Unlock()
-	if server.serviceMap == nil {
-		server.serviceMap = make(map[string]*service)
+func (p *Protocol) register(rcvr interface{}, name string, useName bool) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.serviceMap == nil {
+		p.serviceMap = make(map[string]*service)
 	}
+
 	s := new(service)
 	s.typ = reflect.TypeOf(rcvr)
 	s.rcvr = reflect.ValueOf(rcvr)
+
+	// Check if the given object implements "SetProtocol" and
+	// set the Protocol if possible.
+	if tmp, ok := rcvr.(interface {
+		SetProtocol(*Protocol)
+	}); ok {
+		tmp.SetProtocol(p)
+	}
+
 	sname := reflect.Indirect(s.rcvr).Type().Name()
 	if useName {
 		sname = name
@@ -191,7 +178,7 @@ func (server *Protocol) register(rcvr interface{}, name string, useName bool) er
 		log.Print(s)
 		return errors.New(s)
 	}
-	if _, present := server.serviceMap[sname]; present {
+	if _, present := p.serviceMap[sname]; present {
 		return errors.New("rpc: service already defined: " + sname)
 	}
 	s.name = sname
@@ -211,7 +198,8 @@ func (server *Protocol) register(rcvr interface{}, name string, useName bool) er
 		log.Print(str)
 		return errors.New(str)
 	}
-	server.serviceMap[s.name] = s
+	p.serviceMap[s.name] = s
+
 	return nil
 }
 
@@ -225,6 +213,9 @@ func suitableMethods(typ reflect.Type, reportErr bool) map[string]*methodType {
 		mname := method.Name
 		// Method must be exported.
 		if method.PkgPath != "" {
+			continue
+		}
+		if mname == "SetProtocol" {
 			continue
 		}
 		// Method needs three ins: receiver, *args, *reply.
@@ -281,35 +272,7 @@ func suitableMethods(typ reflect.Type, reportErr bool) map[string]*methodType {
 // contains an error when it is used.
 var invalidRequest = struct{}{}
 
-func (server *Protocol) sendResponse(sending *sync.Mutex, req *RepReq, reply interface{}, codec Codec, errmsg string) {
-	resp := server.getResponse()
-	// Encode the response header
-	resp.ServiceMethod = req.ServiceMethod
-	if errmsg != "" {
-		resp.Error = errmsg
-		reply = invalidRequest
-	}
-	resp.Seq = req.Seq
-	sending.Lock()
-	err := codec.WriteResponse(resp, reply)
-	if err != nil {
-		log.Println("rpc: writing response:", err)
-	}
-	sending.Unlock()
-	server.freeResponse(resp)
-}
-
-func (m *methodType) NumCalls() (n uint) {
-	m.Lock()
-	n = m.numCalls
-	m.Unlock()
-	return n
-}
-
-func (s *service) call(server *Protocol, sending *sync.Mutex, mtype *methodType, req *RepReq, argv, replyv reflect.Value, codec Codec) {
-	mtype.Lock()
-	mtype.numCalls++
-	mtype.Unlock()
+func (s *service) call(server *Protocol, mtype *methodType, req *RepReq, argv, replyv reflect.Value) {
 	function := mtype.method.Func
 	// Invoke the method, providing a new value for the reply.
 	returnValues := function.Call([]reflect.Value{s.rcvr, argv, replyv})
@@ -319,206 +282,284 @@ func (s *service) call(server *Protocol, sending *sync.Mutex, mtype *methodType,
 	if errInter != nil {
 		errmsg = errInter.(error).Error()
 	}
-	server.sendResponse(sending, req, replyv.Interface(), codec, errmsg)
-	server.freeRequest(req)
+	server.sendResponse(req, replyv.Interface(), errmsg)
+	server.freeRepReq(req)
 }
 
-func (p *Protocol) ServeSession(s *Session) {
-	for !s.closing {
-		service, mtype, req, argv, replyv, keepReading, err := p.read(s)
+func (p *Protocol) Serve() {
+	var (
+		err         error
+		repReq      *RepReq
+		service     *service
+		mtype       *methodType
+		argv        reflect.Value
+		replyv      reflect.Value
+		dot         int
+		serviceName string
+		methodName  string
+		argIsValue  bool
+		seq         uint64
+		call        *Call
+	)
+
+ENDFOR:
+	for !p.closing {
+		// Grab the request header.
+		repReq = p.getRepReq()
+		err = p.codec.ReadHeader(repReq)
 		if err != nil {
-			if err != io.EOF {
-				log.Println("rpc:", err)
-			}
-			if !keepReading {
+			repReq = nil
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				break
 			}
-			// send a response if we actually managed to read a header.
-			if req != nil {
-				p.sendResponse(&s.sending, req, invalidRequest, s.codec, err.Error())
-				p.freeRequest(req)
-			}
-			continue
+			err = errors.New("rpc: server cannot decode request: " + err.Error())
+			break
 		}
 
-		if req.Type == REQUEST {
-			go service.call(p, &s.sending, mtype, req, argv, replyv, s.codec)
+		switch repReq.Type {
+		case REQUEST:
+			dot = strings.LastIndex(repReq.ServiceMethod, ".")
+			if dot < 0 {
+				err = errors.New("rpc: service/method request ill-formed: " + repReq.ServiceMethod)
+				p.sendResponse(repReq, invalidRequest, err.Error())
+				p.freeRepReq(repReq)
+				break ENDFOR
+			}
+			serviceName = repReq.ServiceMethod[:dot]
+			methodName = repReq.ServiceMethod[dot+1:]
+
+			// Look up the request.
+			p.mu.RLock()
+			service = p.serviceMap[serviceName]
+			p.mu.RUnlock()
+
+			if service == nil {
+				err = errors.New("rpc: can't find service " + repReq.ServiceMethod)
+				p.sendResponse(repReq, invalidRequest, err.Error())
+				p.freeRepReq(repReq)
+				break ENDFOR
+			}
+			mtype = service.method[methodName]
+			if mtype == nil {
+				err = errors.New("rpc: can't find method " + repReq.ServiceMethod)
+				p.sendResponse(repReq, invalidRequest, err.Error())
+				p.freeRepReq(repReq)
+				break ENDFOR
+			}
+
+			// Decode the argument value.
+			argIsValue = false // if true, need to indirect before calling.
+			if mtype.ArgType.Kind() == reflect.Ptr {
+				argv = reflect.New(mtype.ArgType.Elem())
+			} else {
+				argv = reflect.New(mtype.ArgType)
+				argIsValue = true
+			}
+			// argv guaranteed to be a pointer now.
+			if err = p.codec.ReadBody(argv.Interface()); err != nil {
+				p.sendResponse(repReq, invalidRequest, err.Error())
+				p.freeRepReq(repReq)
+				break ENDFOR
+			}
+			if argIsValue {
+				argv = argv.Elem()
+			}
+
+			replyv = reflect.New(mtype.ReplyType.Elem())
+
+			go service.call(p, mtype, repReq, argv, replyv)
+
+			break
+
+		case RESPONSE:
+			seq = repReq.Seq
+			p.mutex.Lock()
+			call = p.pending[seq]
+			delete(p.pending, seq)
+			p.mutex.Unlock()
+
+			switch {
+			case call == nil:
+				// We've got no pending call. That usually means that
+				// WriteRequest partially failed, and call was already
+				// removed; response is a server telling us about an
+				// error reading request body.
+				if err != nil {
+					err = errors.New("Unknown response id: " + string(seq))
+				}
+			case repReq.Error != "":
+				// We've got an error response. Give this to the request;
+				// any subsequent requests will get the ReadResponseBody
+				// error if there is one.
+				call.Error = ServerError(repReq.Error)
+				call.done()
+			default:
+				err = p.codec.ReadBody(call.Reply)
+				if err != nil {
+					call.Error = errors.New(fmt.Sprintf("Invalid response value: %v", call.Reply))
+					call.done()
+					err = nil
+					break
+				}
+
+				call.done()
+			}
+			break
 		}
 	}
 
 	// Terminate pending calls.
-	s.sending.Lock()
-	s.mutex.Lock()
-	s.shutdown = true
-	closing := s.closing
-	var err error
+	p.sending.Lock()
+	p.mutex.Lock()
+	p.shutdown = true
+	closing := p.closing
+
+	var callError error
 	if closing {
-		err = ErrShutdown
+		callError = ErrShutdown
 	} else {
-		err = io.ErrUnexpectedEOF
+		callError = io.ErrUnexpectedEOF
 	}
-	for _, call := range s.pending {
-		call.Error = err
+	for _, call := range p.pending {
+		call.Error = callError
 		call.done()
 	}
-	s.mutex.Unlock()
-	s.sending.Unlock()
-	if err != io.EOF && !closing {
+	p.mutex.Unlock()
+	p.sending.Unlock()
+	if err != nil && err != io.EOF && !closing {
 		log.Println("rpc: server protocol error:", err)
 	}
 
-	s.Close()
+	p.Close()
 }
 
-// ServeCodec is like ServeConn but uses the specified codec to
-// decode requests and encode responses.
-func (p *Protocol) ServeCodec(codec Codec) {
-	session := &Session{
-		codec:   codec,
-		pending: make(map[uint64]*Call),
-	}
-
-	p.ServeSession(session)
-}
-
-func (server *Protocol) getRequest() *RepReq {
-	server.reqLock.Lock()
-	req := server.freeReq
+func (p *Protocol) getRepReq() *RepReq {
+	p.reqLock.Lock()
+	req := p.freeReq
 	if req == nil {
 		req = new(RepReq)
 	} else {
-		server.freeReq = req.next
+		p.freeReq = req.next
 		*req = RepReq{}
 	}
-	server.reqLock.Unlock()
+	p.reqLock.Unlock()
 	return req
 }
 
-func (server *Protocol) freeRequest(req *RepReq) {
-	server.reqLock.Lock()
-	req.next = server.freeReq
-	server.freeReq = req
-	server.reqLock.Unlock()
+func (p *Protocol) freeRepReq(req *RepReq) {
+	p.reqLock.Lock()
+	req.next = p.freeReq
+	p.freeReq = req
+	p.reqLock.Unlock()
 }
 
-func (server *Protocol) getResponse() *Response {
-	server.respLock.Lock()
-	resp := server.freeResp
-	if resp == nil {
-		resp = new(Response)
-	} else {
-		server.freeResp = resp.next
-		*resp = Response{}
+func (s *Protocol) Close() error {
+	s.mutex.Lock()
+	if s.shutdown || s.closing {
+		s.mutex.Unlock()
+		return ErrShutdown
 	}
-	server.respLock.Unlock()
-	return resp
+	s.closing = true
+	s.mutex.Unlock()
+	return s.codec.Close()
 }
 
-func (server *Protocol) freeResponse(resp *Response) {
-	server.respLock.Lock()
-	resp.next = server.freeResp
-	server.freeResp = resp
-	server.respLock.Unlock()
-}
+func (p *Protocol) sendResponse(req *RepReq, reply interface{}, errmsg string) {
+	req.Type = RESPONSE
+	if errmsg != "" {
+		req.Error = errmsg
+		reply = invalidRequest
+	}
 
-func (server *Protocol) read(s *Session) (service *service, mtype *methodType, repReq *RepReq, argv, replyv reflect.Value, keepReading bool, err error) {
-	// Grab the request header.
-	repReq = server.getRequest()
-	err = s.codec.ReadHeader(repReq)
+	p.sending.Lock()
+	err := p.codec.Write(req, reply)
+	p.sending.Unlock()
+
 	if err != nil {
-		repReq = nil
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			return
-		}
-		err = errors.New("rpc: server cannot decode request: " + err.Error())
+		log.Println("rpc: writing response:", err)
+	}
+}
+
+func (p *Protocol) sendRequest(call *Call) {
+	p.sending.Lock()
+	defer p.sending.Unlock()
+
+	// Register this call.
+	p.mutex.Lock()
+	if p.shutdown || p.closing {
+		call.Error = ErrShutdown
+		p.mutex.Unlock()
+		call.done()
 		return
 	}
+	seq := p.seq
+	p.seq++
+	p.pending[seq] = call
+	p.mutex.Unlock()
 
-	// We read the header successfully.  If we see an error now,
-	// we can still recover and move on to the next request.
-	keepReading = true
-
-	switch repReq.Type {
-	case REQUEST:
-		dot := strings.LastIndex(repReq.ServiceMethod, ".")
-		if dot < 0 {
-			err = errors.New("rpc: service/method request ill-formed: " + repReq.ServiceMethod)
-			return
+	// Encode and send the request.
+	p.request.Type = REQUEST
+	p.request.Seq = seq
+	p.request.ServiceMethod = call.ServiceMethod
+	err := p.codec.Write(&p.request, call.Args)
+	if err != nil {
+		p.mutex.Lock()
+		call = p.pending[seq]
+		delete(p.pending, seq)
+		p.mutex.Unlock()
+		if call != nil {
+			call.Error = err
+			call.done()
 		}
-		serviceName := repReq.ServiceMethod[:dot]
-		methodName := repReq.ServiceMethod[dot+1:]
-
-		// Look up the request.
-		server.mu.RLock()
-		service = server.serviceMap[serviceName]
-		server.mu.RUnlock()
-		if service == nil {
-			err = errors.New("rpc: can't find service " + repReq.ServiceMethod)
-			return
-		}
-		mtype = service.method[methodName]
-		if mtype == nil {
-			err = errors.New("rpc: can't find method " + repReq.ServiceMethod)
-		}
-
-		// Decode the argument value.
-		argIsValue := false // if true, need to indirect before calling.
-		if mtype.ArgType.Kind() == reflect.Ptr {
-			argv = reflect.New(mtype.ArgType.Elem())
-		} else {
-			argv = reflect.New(mtype.ArgType)
-			argIsValue = true
-		}
-		// argv guaranteed to be a pointer now.
-		if err = s.codec.ReadBody(argv.Interface()); err != nil {
-			return
-		}
-		if argIsValue {
-			argv = argv.Elem()
-		}
-
-		replyv = reflect.New(mtype.ReplyType.Elem())
-
-		break
-
-	case RESPONSE:
-		s.handleResponse(err, repReq)
-		break
 	}
-
-	return
 }
 
-// Register publishes the receiver's methods in the DefaultServer.
-func Register(rcvr interface{}) error { return DefaultServer.Register(rcvr) }
+// Go invokes the function asynchronously.  It returns the Call structure representing
+// the invocation.  The done channel will signal when the call is complete by returning
+// the same Call object.  If done is nil, Go will allocate a new channel.
+// If non-nil, done must be buffered or Go will deliberately crash.
+func (s *Protocol) Go(serviceMethod string, args interface{}, reply interface{}, done chan *Call) *Call {
+	call := new(Call)
+	call.ServiceMethod = serviceMethod
+	call.Args = args
+	call.Reply = reply
+	if done == nil {
+		done = make(chan *Call, 10) // buffered.
+	} else {
+		// If caller passes done != nil, it must arrange that
+		// done has enough buffer for the number of simultaneous
+		// RPCs that will be using that channel.  If the channel
+		// is totally unbuffered, it's best not to run at all.
+		if cap(done) == 0 {
+			log.Panic("rpc: done channel is unbuffered")
+		}
+	}
+	call.Done = done
+	s.sendRequest(call)
+	return call
+}
 
-// RegisterName is like Register but uses the provided name for the type
-// instead of the receiver's concrete type.
-func RegisterName(name string, rcvr interface{}) error {
-	return DefaultServer.RegisterName(name, rcvr)
+// Call invokes the named function, waits for it to complete, and returns its error status.
+func (s *Protocol) Call(serviceMethod string, args interface{}, reply interface{}) error {
+	call := <-s.Go(serviceMethod, args, reply, make(chan *Call, 1)).Done
+	return call.Error
 }
 
 // A Codec implements reading of RPC requests and writing of
 // RPC responses for the server side of an RPC session.
-// The server calls ReadRequestHeader and ReadRequestBody in pairs
-// to read requests from the connection, and it calls WriteResponse to
+// The server calls ReadHeader and ReadBody in pairs
+// to read requests from the connection, and it calls Write to
 // write a response back.  The server calls Close when finished with the
-// connection. ReadRequestBody may be called with a nil
+// connection. ReadBody may be called with a nil
 // argument to force the body of the request to be read and discarded.
 type Codec interface {
 	ReadHeader(*RepReq) error
 	ReadBody(interface{}) error
-	WriteResponse(*Response, interface{}) error
-	WriteRequest(*Request, interface{}) error
+	Write(*RepReq, interface{}) error
 
 	Close() error
 }
 
-// ServeCodec is like ServeConn but uses the specified codec to
-// decode requests and encode responses.
-func ServeCodec(codec Codec) {
-	DefaultServer.ServeCodec(codec)
+type ExtendedMethod interface {
+	SetProtocol(*Protocol)
 }
-
-// Can connect to RPC service using HTTP CONNECT to rpcPath.
-var connected = "200 Connected to Go RPC"
