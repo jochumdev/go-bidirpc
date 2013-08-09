@@ -8,18 +8,18 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"github.com/pcdummy/gosrpc"
+	"github.com/pcdummy/bidirpc"
 	"io"
 	"labix.org/v2/mgo/bson"
 )
 
-func NewClient(conn io.ReadWriteCloser) (c *srpc.Protocol) {
+func NewClient(conn io.ReadWriteCloser) (c *bidirpc.Protocol) {
 	cc := NewCodec(conn)
-	c = srpc.NewClientWithCodec(cc)
+	c = bidirpc.NewClientWithCodec(cc)
 	return
 }
 
-func NewCodec(conn io.ReadWriteCloser) (cc srpc.Codec) {
+func NewCodec(conn io.ReadWriteCloser) (cc bidirpc.Codec) {
 	rBuf := bufio.NewReader(conn)
 	wBuf := bufio.NewWriter(conn)
 	cc = &codec{
@@ -38,7 +38,7 @@ type codec struct {
 	wBuf *bufio.Writer
 }
 
-func (c *codec) Write(rs *srpc.RepReq, v interface{}) (err error) {
+func (c *codec) Write(rs *bidirpc.RepReq, v interface{}) (err error) {
 	if err = c.encode(rs); err != nil {
 		return
 	}
@@ -52,7 +52,7 @@ func (c *codec) Write(rs *srpc.RepReq, v interface{}) (err error) {
 	return
 }
 
-func (c *codec) ReadHeader(res *srpc.RepReq) (err error) {
+func (c *codec) ReadHeader(res *bidirpc.RepReq) (err error) {
 	err = c.decode(res)
 	return
 }
