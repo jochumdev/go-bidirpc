@@ -8,7 +8,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"github.com/pcdummy/bidirpc"
+	"github.com/pcdummy/go-bidirpc"
 	"io"
 	"labix.org/v2/mgo/bson"
 )

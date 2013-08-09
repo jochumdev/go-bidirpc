@@ -5,8 +5,9 @@
 package bidirpc
 
 import (
-	"github.com/pcdummy/bidirpc"
-	"github.com/pcdummy/bidirpc/bsonrpc"
+	"github.com/pcdummy/go-bidirpc"
+	"github.com/pcdummy/go-bidirpc/bsonrpc"
+	"github.com/pcdummy/go-bidirpc/gobrpc"
 	"log"
 	"net"
 	"runtime"
@@ -16,8 +17,8 @@ import (
 )
 
 var (
-	serverAddr string
-	once       sync.Once
+	serverBSON, serverGob string
+	onceBSON, onceGob     sync.Once
 )
 
 type Args struct {
@@ -44,9 +45,9 @@ func listenTCP() (net.Listener, string) {
 	return l, l.Addr().String()
 }
 
-func startServer() {
+func startBSONServer() {
 	var l net.Listener
-	l, serverAddr = listenTCP()
+	l, serverBSON = listenTCP()
 
 	go func() {
 		for {
@@ -56,16 +57,77 @@ func startServer() {
 			}
 
 			c := bsonrpc.NewCodec(conn)
-			s := srpc.NewProtocol(c)
+			s := bidirpc.NewProtocol(c)
 			s.Register(new(Arith))
 			go s.Serve()
 		}
 	}()
 }
 
+func startGobServer() {
+	var l net.Listener
+	l, serverGob = listenTCP()
+
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				log.Fatal("accept error:", err)
+			}
+
+			c := gobrpc.NewCodec(conn)
+			s := bidirpc.NewProtocol(c)
+			s.Register(new(Arith))
+			go s.Serve()
+		}
+	}()
+}
+
+func TestBSONConnection(t *testing.T) {
+	onceBSON.Do(startBSONServer)
+
+	conn, err := net.Dial("tcp", serverBSON)
+	if err != nil {
+		log.Fatal("error dialing:", err)
+	}
+
+	args := &Args{7, 8}
+	reply := new(Reply)
+	client := bsonrpc.NewClient(conn)
+	err = client.Call("Arith.Add", args, reply)
+	if err != nil {
+		t.Fatalf("rpc error: Add: expected no error but got string %q", err.Error())
+	}
+	if reply.C != args.A+args.B {
+		t.Fatalf("rpc error: Add: expected %d got %d", reply.C, args.A+args.B)
+	}
+	client.Close()
+}
+
+func TestGobConnection(t *testing.T) {
+	onceGob.Do(startGobServer)
+
+	conn, err := net.Dial("tcp", serverGob)
+	if err != nil {
+		log.Fatal("error dialing:", err)
+	}
+
+	args := &Args{7, 8}
+	reply := new(Reply)
+	client := gobrpc.NewClient(conn)
+	err = client.Call("Arith.Add", args, reply)
+	if err != nil {
+		t.Fatalf("rpc error: Add: expected no error but got string %q", err.Error())
+	}
+	if reply.C != args.A+args.B {
+		t.Fatalf("rpc error: Add: expected %d got %d", reply.C, args.A+args.B)
+	}
+	client.Close()
+}
+
 func BenchmarkConnections(b *testing.B) {
 	b.StopTimer()
-	once.Do(startServer)
+	onceBSON.Do(startBSONServer)
 	procs := runtime.GOMAXPROCS(-1)
 	N := int32(b.N)
 	var wg sync.WaitGroup
@@ -75,7 +137,7 @@ func BenchmarkConnections(b *testing.B) {
 	for p := 0; p < procs; p++ {
 		go func() {
 			for atomic.AddInt32(&N, -1) >= 0 {
-				conn, err := net.Dial("tcp", serverAddr)
+				conn, err := net.Dial("tcp", serverBSON)
 				if err != nil {
 					log.Fatal("error dialing:", err)
 				}
@@ -100,9 +162,9 @@ func BenchmarkConnections(b *testing.B) {
 
 func BenchmarkEndToEnd(b *testing.B) {
 	b.StopTimer()
-	once.Do(startServer)
+	onceBSON.Do(startBSONServer)
 
-	conn, err := net.Dial("tcp", serverAddr)
+	conn, err := net.Dial("tcp", serverBSON)
 	if err != nil {
 		log.Fatal("error dialing:", err)
 	}

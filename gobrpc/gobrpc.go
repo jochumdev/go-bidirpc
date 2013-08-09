@@ -7,7 +7,7 @@ package gobrpc
 import (
 	"bufio"
 	"encoding/gob"
-	"github.com/pcdummy/bidirpc"
+	"github.com/pcdummy/go-bidirpc"
 	"io"
 )
 

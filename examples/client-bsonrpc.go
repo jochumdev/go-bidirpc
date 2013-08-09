@@ -6,8 +6,8 @@ package main
 
 import (
 	"fmt"
-	"github.com/pcdummy/bidirpc"
-	"github.com/pcdummy/bidirpc/bsonrpc"
+	"github.com/pcdummy/go-bidirpc"
+	"github.com/pcdummy/go-bidirpc/bsonrpc"
 	"log"
 	"net"
 )
