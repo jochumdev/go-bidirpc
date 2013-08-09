@@ -44,22 +44,17 @@ func (c *codec) Write(rs *bidirpc.RepReq, v interface{}) (err error) {
 		return
 	}
 
-	err = c.wBuf.Flush()
-
-	return
+	return c.wBuf.Flush()
 }
 
 func (c *codec) ReadHeader(res *bidirpc.RepReq) (err error) {
-	err = c.dec.Decode(res)
-	return
+	return c.dec.Decode(res)
 }
 
 func (c *codec) ReadBody(v interface{}) (err error) {
-	err = c.dec.Decode(v)
-	return
+	return c.dec.Decode(v)
 }
 
 func (c *codec) Close() (err error) {
-	err = c.conn.Close()
-	return
+	return c.conn.Close()
 }

@@ -47,24 +47,19 @@ func (c *codec) Write(rs *bidirpc.RepReq, v interface{}) (err error) {
 		return
 	}
 
-	err = c.wBuf.Flush()
-
-	return
+	return c.wBuf.Flush()
 }
 
 func (c *codec) ReadHeader(res *bidirpc.RepReq) (err error) {
-	err = c.decode(res)
-	return
+	return c.decode(res)
 }
 
 func (c *codec) ReadBody(v interface{}) (err error) {
-	err = c.decode(v)
-	return
+	return c.decode(v)
 }
 
 func (c *codec) Close() (err error) {
-	err = c.conn.Close()
-	return
+	return c.conn.Close()
 }
 
 func (c *codec) encode(v interface{}) (err error) {
@@ -106,7 +101,5 @@ func (c *codec) decode(pv interface{}) (err error) {
 		return
 	}
 
-	err = bson.Unmarshal(buf, pv)
-
-	return
+	return bson.Unmarshal(buf, pv)
 }
