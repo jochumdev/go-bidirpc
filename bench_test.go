@@ -114,7 +114,10 @@ func TestBSONConnection(t *testing.T) {
 
 	args := &Args{7, 8}
 	reply := new(Reply)
-	client := bson.NewClient(conn)
+	
+	cc := bson.NewCodec(conn)
+	client := protocol.NewClientWithCodec(cc)
+
 	err = client.Call("Arith.Add", args, reply)
 	if err != nil {
 		t.Fatalf("rpc error: Add: expected no error but got string %q", err.Error())
@@ -135,7 +138,10 @@ func TestGobConnection(t *testing.T) {
 
 	args := &Args{7, 8}
 	reply := new(Reply)
-	client := gob.NewClient(conn)
+
+	cc := gob.NewCodec(conn)
+	client := protocol.NewClientWithCodec(cc)
+
 	err = client.Call("Arith.Add", args, reply)
 	if err != nil {
 		t.Fatalf("rpc error: Add: expected no error but got string %q", err.Error())
@@ -156,7 +162,10 @@ func TestMsgPackConnection(t *testing.T) {
 
 	args := &Args{7, 8}
 	reply := new(Reply)
-	client := msgpack.NewClient(conn)
+
+	cc := msgpack.NewCodec(conn)
+	client := protocol.NewClientWithCodec(cc)
+
 	err = client.Call("Arith.Add", args, reply)
 	if err != nil {
 		t.Fatalf("rpc error: Add: expected no error but got string %q", err.Error())
@@ -186,7 +195,10 @@ func BenchmarkConnections(b *testing.B) {
 
 				args := &Args{7, 8}
 				reply := new(Reply)
-				client := bson.NewClient(conn)
+
+				cc := bson.NewCodec(conn)
+				client := protocol.NewClientWithCodec(cc)							
+
 				err = client.Call("Arith.Add", args, reply)
 				if err != nil {
 					b.Fatalf("rpc error: Add: expected no error but got string %q", err.Error())
@@ -211,7 +223,8 @@ func BenchmarkEndToEnd(b *testing.B) {
 		log.Fatal("error dialing:", err)
 	}
 
-	client := bson.NewClient(conn)
+	cc := bson.NewCodec(conn)
+	client := protocol.NewClientWithCodec(cc)
 	defer client.Close()
 
 	// Synchronous calls

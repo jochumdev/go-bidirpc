@@ -10,7 +10,7 @@ import (
 	"net"
 
 	"github.com/jochumdev/go-bidirpc/encoding/gob"
-	bidirpc "github.com/jochumdev/go-bidirpc/protocol"
+	"github.com/jochumdev/go-bidirpc/protocol"
 )
 
 type EchoArgs struct {
@@ -22,11 +22,10 @@ type EchoReply struct {
 }
 
 type Arith struct {
-	count int
-	p     *bidirpc.Protocol
+	p     *protocol.Protocol
 }
 
-func (t *Arith) SetProtocol(p *bidirpc.Protocol) {
+func (t *Arith) SetProtocol(p *protocol.Protocol) {
 	t.p = p
 }
 
@@ -43,7 +42,9 @@ func main() {
 		log.Fatal("dialing:", err)
 	}
 
-	client := gob.NewClient(conn)
+	cc := gob.NewCodec(conn)
+	client := protocol.NewClientWithCodec(cc)
+
 	client.Register(new(Arith))
 	defer client.Close()
 

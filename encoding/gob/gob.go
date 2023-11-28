@@ -12,12 +12,6 @@ import (
 	bidirpc "github.com/jochumdev/go-bidirpc/protocol"
 )
 
-func NewClient(conn io.ReadWriteCloser) (c *bidirpc.Protocol) {
-	cc := NewCodec(conn)
-	c = bidirpc.NewClientWithCodec(cc)
-	return
-}
-
 func NewCodec(conn io.ReadWriteCloser) (cc bidirpc.Codec) {
 	wBuf := bufio.NewWriter(conn)
 	cc = &codec{

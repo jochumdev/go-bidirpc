@@ -14,12 +14,6 @@ import (
 	"labix.org/v2/mgo/bson"
 )
 
-func NewClient(conn io.ReadWriteCloser) (c *bidirpc.Protocol) {
-	cc := NewCodec(conn)
-	c = bidirpc.NewClientWithCodec(cc)
-	return
-}
-
 func NewCodec(conn io.ReadWriteCloser) (cc bidirpc.Codec) {
 	rBuf := bufio.NewReader(conn)
 	wBuf := bufio.NewWriter(conn)

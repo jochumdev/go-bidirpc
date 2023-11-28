@@ -12,12 +12,6 @@ import (
 	"github.com/ugorji/go/codec"
 )
 
-func NewClient(conn io.ReadWriteCloser) (c *bidirpc.Protocol) {
-	cc := NewCodec(conn)
-	c = bidirpc.NewClientWithCodec(cc)
-	return
-}
-
 func NewCodec(conn io.ReadWriteCloser) (cc bidirpc.Codec) {
 	h := &codec.MsgpackHandle{}
 	wBuf := bufio.NewWriter(conn)
