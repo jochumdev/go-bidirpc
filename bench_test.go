@@ -1,20 +1,21 @@
-// Copyright 2013 René Kistl. All rights reserved.
+// Copyright 2023 René Jochum. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
 package bidirpc
 
 import (
-	"github.com/pcdummy/go-bidirpc"
-	"github.com/pcdummy/go-bidirpc/bsonrpc"
-	"github.com/pcdummy/go-bidirpc/gobrpc"
-	"github.com/pcdummy/go-bidirpc/msgpackrpc"
 	"log"
 	"net"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/jochumdev/go-bidirpc/bsonrpc"
+	"github.com/jochumdev/go-bidirpc/gobrpc"
+	"github.com/jochumdev/go-bidirpc/msgpackrpc"
+	"github.com/jochumdev/go-bidirpc/protocol"
 )
 
 var (
@@ -58,7 +59,7 @@ func startBSONServer() {
 			}
 
 			c := bsonrpc.NewCodec(conn)
-			s := bidirpc.NewProtocol(c)
+			s := protocol.NewProtocol(c)
 			s.Register(new(Arith))
 			go s.Serve()
 		}
@@ -77,7 +78,7 @@ func startGobServer() {
 			}
 
 			c := gobrpc.NewCodec(conn)
-			s := bidirpc.NewProtocol(c)
+			s := protocol.NewProtocol(c)
 			s.Register(new(Arith))
 			go s.Serve()
 		}
@@ -96,7 +97,7 @@ func startMsgPackServer() {
 			}
 
 			c := msgpackrpc.NewCodec(conn)
-			s := bidirpc.NewProtocol(c)
+			s := protocol.NewProtocol(c)
 			s.Register(new(Arith))
 			go s.Serve()
 		}

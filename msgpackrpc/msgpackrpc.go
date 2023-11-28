@@ -1,4 +1,4 @@
-// Copyright 2013 René Kistl. All rights reserved.
+// Copyright 2023 René Jochum. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -6,9 +6,10 @@ package msgpackrpc
 
 import (
 	"bufio"
-	"github.com/pcdummy/go-bidirpc"
-	"github.com/ugorji/go/codec"
 	"io"
+
+	bidirpc "github.com/jochumdev/go-bidirpc/protocol"
+	"github.com/ugorji/go/codec"
 )
 
 func NewClient(conn io.ReadWriteCloser) (c *bidirpc.Protocol) {

@@ -1,8 +1,8 @@
-// Copyright 2013 René Kistl. All rights reserved.
+// Copyright 2023 René Jochum. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package bidirpc
+package protocol
 
 import (
 	"errors"
@@ -369,8 +369,6 @@ ENDFOR:
 
 			go service.call(p, mtype, repReq, argv, replyv)
 
-			break
-
 		case RESPONSE:
 			seq = repReq.Seq
 			p.mutex.Lock()
@@ -385,7 +383,7 @@ ENDFOR:
 				// removed; response is a server telling us about an
 				// error reading request body.
 				if err != nil {
-					err = errors.New("Unknown response id: " + string(seq))
+					err = fmt.Errorf("unknown response id: %d", seq)
 				}
 			case repReq.Error != "":
 				// We've got an error response. Give this to the request;
@@ -396,7 +394,7 @@ ENDFOR:
 			default:
 				err = p.codec.ReadBody(call.Reply)
 				if err != nil {
-					call.Error = errors.New(fmt.Sprintf("Invalid response value: %v", call.Reply))
+					call.Error = fmt.Errorf("invalid response value: %v", call.Reply)
 					call.done()
 					err = nil
 					break
@@ -404,7 +402,6 @@ ENDFOR:
 
 				call.done()
 			}
-			break
 		}
 	}
 

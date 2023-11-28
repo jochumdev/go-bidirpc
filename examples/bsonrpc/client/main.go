@@ -1,4 +1,4 @@
-// Copyright 2013 René Kistl. All rights reserved.
+// Copyright 2023 René Jochum. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -6,10 +6,11 @@ package main
 
 import (
 	"fmt"
-	"github.com/pcdummy/go-bidirpc"
-	"github.com/pcdummy/go-bidirpc/gobrpc"
 	"log"
 	"net"
+
+	"github.com/jochumdev/go-bidirpc/bsonrpc"
+	bidirpc "github.com/jochumdev/go-bidirpc/protocol"
 )
 
 type EchoArgs struct {
@@ -42,7 +43,7 @@ func main() {
 		log.Fatal("dialing:", err)
 	}
 
-	client := gobrpc.NewClient(conn)
+	client := bsonrpc.NewClient(conn)
 	client.Register(new(Arith))
 	defer client.Close()
 
