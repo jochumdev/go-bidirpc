@@ -9,7 +9,7 @@ import (
 	"log"
 	"net"
 
-	"github.com/jochumdev/go-bidirpc/bsonrpc"
+	"github.com/jochumdev/go-bidirpc/encoding/gob"
 	bidirpc "github.com/jochumdev/go-bidirpc/protocol"
 )
 
@@ -59,7 +59,7 @@ func main() {
 		// and the methods needs to be Registered at every session.
 		// The methods need to be goroutine save and they
 		// are unique per session.
-		c := bsonrpc.NewCodec(conn)
+		c := gob.NewCodec(conn)
 		s := bidirpc.NewProtocol(c)
 		s.Register(new(Arith))
 		go s.Serve()

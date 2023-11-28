@@ -9,7 +9,7 @@ import (
 	"log"
 	"net"
 
-	"github.com/jochumdev/go-bidirpc/gobrpc"
+	"github.com/jochumdev/go-bidirpc/encoding/gob"
 	bidirpc "github.com/jochumdev/go-bidirpc/protocol"
 )
 
@@ -43,7 +43,7 @@ func main() {
 		log.Fatal("dialing:", err)
 	}
 
-	client := gobrpc.NewClient(conn)
+	client := gob.NewClient(conn)
 	client.Register(new(Arith))
 	defer client.Close()
 

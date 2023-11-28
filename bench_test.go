@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/jochumdev/go-bidirpc/bsonrpc"
-	"github.com/jochumdev/go-bidirpc/gobrpc"
-	"github.com/jochumdev/go-bidirpc/msgpackrpc"
+	"github.com/jochumdev/go-bidirpc/encoding/bson"
+	"github.com/jochumdev/go-bidirpc/encoding/gob"
+	"github.com/jochumdev/go-bidirpc/encoding/msgpack"
 	"github.com/jochumdev/go-bidirpc/protocol"
 )
 
@@ -58,7 +58,7 @@ func startBSONServer() {
 				log.Fatal("accept error:", err)
 			}
 
-			c := bsonrpc.NewCodec(conn)
+			c := bson.NewCodec(conn)
 			s := protocol.NewProtocol(c)
 			s.Register(new(Arith))
 			go s.Serve()
@@ -77,7 +77,7 @@ func startGobServer() {
 				log.Fatal("accept error:", err)
 			}
 
-			c := gobrpc.NewCodec(conn)
+			c := gob.NewCodec(conn)
 			s := protocol.NewProtocol(c)
 			s.Register(new(Arith))
 			go s.Serve()
@@ -96,7 +96,7 @@ func startMsgPackServer() {
 				log.Fatal("accept error:", err)
 			}
 
-			c := msgpackrpc.NewCodec(conn)
+			c := msgpack.NewCodec(conn)
 			s := protocol.NewProtocol(c)
 			s.Register(new(Arith))
 			go s.Serve()
@@ -114,7 +114,7 @@ func TestBSONConnection(t *testing.T) {
 
 	args := &Args{7, 8}
 	reply := new(Reply)
-	client := bsonrpc.NewClient(conn)
+	client := bson.NewClient(conn)
 	err = client.Call("Arith.Add", args, reply)
 	if err != nil {
 		t.Fatalf("rpc error: Add: expected no error but got string %q", err.Error())
@@ -135,7 +135,7 @@ func TestGobConnection(t *testing.T) {
 
 	args := &Args{7, 8}
 	reply := new(Reply)
-	client := gobrpc.NewClient(conn)
+	client := gob.NewClient(conn)
 	err = client.Call("Arith.Add", args, reply)
 	if err != nil {
 		t.Fatalf("rpc error: Add: expected no error but got string %q", err.Error())
@@ -156,7 +156,7 @@ func TestMsgPackConnection(t *testing.T) {
 
 	args := &Args{7, 8}
 	reply := new(Reply)
-	client := msgpackrpc.NewClient(conn)
+	client := msgpack.NewClient(conn)
 	err = client.Call("Arith.Add", args, reply)
 	if err != nil {
 		t.Fatalf("rpc error: Add: expected no error but got string %q", err.Error())
@@ -186,7 +186,7 @@ func BenchmarkConnections(b *testing.B) {
 
 				args := &Args{7, 8}
 				reply := new(Reply)
-				client := bsonrpc.NewClient(conn)
+				client := bson.NewClient(conn)
 				err = client.Call("Arith.Add", args, reply)
 				if err != nil {
 					b.Fatalf("rpc error: Add: expected no error but got string %q", err.Error())
@@ -211,7 +211,7 @@ func BenchmarkEndToEnd(b *testing.B) {
 		log.Fatal("error dialing:", err)
 	}
 
-	client := bsonrpc.NewClient(conn)
+	client := bson.NewClient(conn)
 	defer client.Close()
 
 	// Synchronous calls

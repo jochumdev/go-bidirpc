@@ -9,7 +9,7 @@ import (
 	"log"
 	"net"
 
-	"github.com/jochumdev/go-bidirpc/bsonrpc"
+	"github.com/jochumdev/go-bidirpc/encoding/bson"
 	bidirpc "github.com/jochumdev/go-bidirpc/protocol"
 )
 
@@ -43,7 +43,7 @@ func main() {
 		log.Fatal("dialing:", err)
 	}
 
-	client := bsonrpc.NewClient(conn)
+	client := bson.NewClient(conn)
 	client.Register(new(Arith))
 	defer client.Close()
 
